@@ -1,0 +1,187 @@
+# This file is a template, and might need editing before it works on your project.
+# This is a sample GitLab CI/CD configuration file that should run without any modifications.
+# It demonstrates a basic 3 stage CI/CD pipeline. Instead of real tests or scripts,
+# it uses echo commands to simulate the pipeline execution.
+#
+# A pipeline is composed of independent jobs that run scripts, grouped into stages.
+# Stages run in sequential order, but jobs within stages run in parallel.
+#
+# For more information, see: https://docs.gitlab.com/ee/ci/yaml/index.html#stages
+#
+# You can copy and paste this template into a new `.gitlab-ci.yml` file.
+# You should not add this template to an existing `.gitlab-ci.yml` file by using the `include:` keyword.
+#
+# To contribute improvements to CI/CD templates, please follow the Development guide at:
+# https://docs.gitlab.com/ee/development/cicd/templates.html
+# This specific template is located at:
+# https://gitlab.com/gitlab-org/gitlab/-/blob/master/lib/gitlab/ci/templates/Getting-Started.gitlab-ci.yml
+
+.install_docker: &install_docker |
+  apt-get update
+  apt-get -y install apt-transport-https ca-certificates curl software-properties-common
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | apt-key add -
+  add-apt-repository "deb [arch=amd64] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable"
+  apt-get update
+  apt-get -y install docker-ce
+  service docker start
+
+stages:          # List of stages for jobs, and their order of execution
+  - test
+  - build
+  - deploy
+  - cleanup
+
+before_script:
+  - |
+    echo "DATABASE_URL=${DATABASE_URL}" > .env
+    echo DATABASE_USER=${DATABASE_USER} >> .env
+    echo DATABASE_PASSWORD=${DATABASE_PASSWORD} >> .env
+    echo EXCHANGE_API_KEY_1=${EXCHANGE_API_KEY_1} >> .env
+    echo EXCHANGE_API_KEY_2=${EXCHANGE_API_KEY_2} >> .env
+    echo REDIS_HOST=${REDIS_HOST} >> .env
+    echo REDIS_PASSWORD=${REDIS_PASSWORD} >> .env
+    echo REDIS_PORT=${REDIS_PORT} >> .env
+    echo JWT_SECRET_KEY=${JWT_SECRET_KEY} >> .env
+    echo SMTP_HOST=${SMTP_HOST} >> .env
+    echo SMTP_PASSWORD=${SMTP_PASSWORD} >> .env
+    echo SMTP_PORT=${SMTP_PORT} >> .env
+    echo SMTP_USERNAME=${SMTP_USERNAME} >> .env
+    echo SMTP_USE_TLS=${SMTP_USE_TLS} >> .env
+    echo DISCOVERY_URL=${DISCOVERY_URL} >> .env
+    echo EXCHANGE_INITIALIZE_PRODUCTS=${EXCHANGE_INITIALIZE_PRODUCTS} >> .env
+    echo KAFKA_IP=${REDIS_HOST} >> .env
+    echo ALLOWED_ORIGIN=${ALLOWED_ORIGIN} >> .env
+    cat .env
+
+variables:
+  MAVEN_OPTS: "-Djava.awt.headless=true -Dmaven.repo.local=./.m2/repository"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end --show-version"
+  IMAGE_NAME: tradeflowsapp/$CI_PROJECT_NAME:$CI_PIPELINE_IID
+  CONTAINER_NAME: $CI_PROJECT_NAME
+
+cache:
+  paths:
+    - .m2/repository
+  # keep cache across branch
+  key: "$CI_BUILD_REF_NAME"
+
+unit-test-job:   # This job runs in the test stage.
+  stage: test    # It only starts when the job in the build stage completes successfully.
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_COMMIT_REF_NAME != "main"'
+  tags:
+    - tf-jobs
+  image: maven:3.9.8
+  script:
+    - echo "Running unit tests..."
+    - mvn dependency:go-offline $MAVEN_CLI_OPTS
+    - mvn test $MAVEN_CLI_OPTS
+
+build-job:       # This job runs in the build stage, which runs first.
+  stage: build
+  only:
+    - main
+  tags:
+    - tf-jobs
+  script:
+    - echo "Compiling the code..."
+    - *install_docker
+    - unset DOCKER_HOST
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker build -t $IMAGE_NAME -f Dockerfile .
+    - echo $IMAGE_NAME
+    - docker push $IMAGE_NAME
+
+deploy-job:      # This job runs in the deploy stage.
+  stage: deploy  # It only runs when *both* jobs in the test stage complete successfully.
+  only:
+    - main
+  tags:
+    - tf-jobs
+  environment: production
+  script:
+    - echo "Deploying application..."
+    - |
+      apt-get update -y
+      apt-get install openssh-client -y
+      echo "$SSH_PEM_KEY" > server_key.pem
+      chmod 600 server_key.pem
+      scp -o StrictHostKeyChecking=no -i server_key.pem .env tradeflows@$SSH_HOST:/home/tradeflows/.env
+      ssh -o StrictHostKeyChecking=no -i server_key.pem tradeflows@$SSH_HOST << EOF
+        set -e
+        ENV_FILE=./.env
+        SERVER_PORT=8083
+        TAG_IMAGE="$CI_PIPELINE_IID"
+        IMAGE_NAME=tradeflowsapp/$CI_PROJECT_NAME:$IMAGE_TAG
+        CONTAINER_NAME=tf-order-service
+        HEALTH_CHECK_URL=http://localhost:$SERVER_PORT/actuator/health
+      
+        determine_previous_tag() {
+          current_tag=\$IMAGE_NAME
+          echo \$((current_tag - 1))
+        }
+        PREVIOUS_TAG=$(determine_previous_tag)
+        PREVIOUS_IMAGE_NAME=tradeflowsapp/$CI_PROJECT_NAME:$PREVIOUS_TAG
+        echo "Previous image name: $PREVIOUS_IMAGE_NAME"
+        docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+        echo "Image Name - $IMAGE_NAME"
+        docker pull $IMAGE_NAME
+        echo "Container Name - $CONTAINER_NAME"
+        # Check if the container exists
+        if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
+          echo "Container exists. Committing..."
+          echo "Stopping $CONTAINER_NAME"
+          docker stop $CONTAINER_NAME
+          echo "Backing up Container $CONTAINER_NAME to ${CONTAINER_NAME}_backup"
+          docker commit $CONTAINER_NAME "${CONTAINER_NAME}_backup"
+          echo "Removing Container $CONTAINER_NAME"
+          docker rm $CONTAINER_NAME
+          echo "Container $CONTAINER_NAME Removed"
+        else
+          echo "Container not found. Skipping commit."
+        fi
+      
+        echo "Staring $CONTAINER_NAME on PORT ${SERVER_PORT}"
+        docker run -id -p 8083:8083 --name $CONTAINER_NAME --env-file=/home/tradeflows/.env -e SERVER_PORT=$SERVER_PORT --restart always $IMAGE_NAME 
+
+        echo "Verifying $CONTAINER_NAME is healthy"
+
+        timeout=30
+        interval=5
+        while [ \$timeout -gt 0 ]; do
+          if curl -fs \$HEALTH_CHECK_URL; then
+            echo "New container is healthy."
+            break
+          else
+            echo "Waiting for the new container to be healthy..."
+            sleep \$interval
+            timeout=\$((timeout - interval))
+          fi
+        done
+      
+        if [ \$timeout -le 0]; then
+          echo "New container failed to run. Rolling back..."
+          docker ps -q --filter "name=$CONTAINER_NAME" | xargs -r docker stop
+          docker ps -q --filter "name=$CONTAINER_NAME" | xargs -r docker rm
+          docker run -id -p 8083:8083 --name $CONTAINER_NAME --env-file=$ENV_FILE -e SERVER_PORT=$SERVER_PORT --restart always ${CONTAINER_NAME}_backup
+          exit 1
+        fi
+      
+        docker rmi \${CONTAINER_NAME}_backup
+        docker rmi \${PREVIOUS_IMAGE_NAME} || true
+        docker image prune -f
+      EOF
+
+cleanup_job:
+  stage: cleanup
+  only:
+    - main
+  needs:
+    - build-job
+    - deploy-job
+  tags:
+    - tf-jobs
+  script:
+    - echo "Cleaning up"
+    - rm -rf "%CACHE_PATH%/%CI_PIPELINE_ID%"
+  when: always
