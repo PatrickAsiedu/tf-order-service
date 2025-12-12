@@ -12,6 +12,7 @@ import app.tradeflows.api.order_service.entities.PortfolioProduct;
 import app.tradeflows.api.order_service.entities.Product;
 import app.tradeflows.api.order_service.enums.BalanceAction;
 import app.tradeflows.api.order_service.enums.OrderStatus;
+import app.tradeflows.api.order_service.enums.OrderType;
 import app.tradeflows.api.order_service.enums.UpdateType;
 import app.tradeflows.api.order_service.events.publishers.UserAccountBalanceEventPublisher;
 import app.tradeflows.api.order_service.exceptions.InsufficientBalanceException;
@@ -82,14 +83,20 @@ public class OrderService {
     public Order createOrder(OrderDTO orderDTO) throws InvalidOrderException, InsufficientBalanceException, InsufficientStocksException {
         boolean isValid = false;
 
-        switch (orderDTO.getSide()) {
-            case SELL -> {
-                isValid = priceIsValid(orderDTO) && quantityIsValid(orderDTO) && clientHasEnoughStock(orderDTO);
-            }
-            case BUY -> {
-                isValid = priceIsValid(orderDTO) && quantityIsValid(orderDTO) && balanceIsEnough(orderDTO);
-            }
+       switch (orderDTO.getSide()) {
+        case SELL -> {
+            // Only validate price for limit orders
+            isValid = (orderDTO.getType() == OrderType.MARKET || priceIsValid(orderDTO)) 
+                    && quantityIsValid(orderDTO) 
+                    && clientHasEnoughStock(orderDTO);
         }
+        case BUY -> {
+            // Only validate price for limit orders
+            isValid = (orderDTO.getType() == OrderType.MARKET || priceIsValid(orderDTO)) 
+                    && quantityIsValid(orderDTO) 
+                    && balanceIsEnough(orderDTO);
+        }
+    }
 
         Order order = new Order();
         Order saveResult = null;
@@ -101,42 +108,63 @@ public class OrderService {
             Product product = productRepository.findByTicker(orderDTO.getProduct())
                     .orElseThrow(() -> new NotFoundException(orderDTO.getProduct() + " does not exist"));
 
-            switch (orderDTO.getSide()) {
-                case SELL -> {
+        switch (orderDTO.getSide()) {
+            case SELL -> {
+                PortfolioProduct portfolioProduct = portfolioProductRepository
+                        .findByPortfolioIdAndProductId(orderDTO.getPortfolioId(), product.getId());
 
-                    PortfolioProduct portfolioProduct = portfolioProductRepository
-                            .findByPortfolioIdAndProductId(orderDTO.getPortfolioId(), product.getId());
-
-                    if(portfolioProduct.getQuantity() < orderDTO.getQuantity()){
-                        throw new InsufficientStocksException("You don't have enough stock to make this order");
-                    }
-
-                    portfolioProduct.setQuantity(portfolioProduct.getQuantity() - orderDTO.getQuantity());
-                    portfolioProduct.setLockedQuantity(portfolioProduct.getLockedQuantity() + orderDTO.getQuantity());
-
-                    portfolioProductRepository.save(portfolioProduct);
+                if (portfolioProduct == null) {
+                    throw new NotFoundException("You don't own this product in your portfolio");
                 }
-                case BUY -> {
-                    UserBalanceUpdateDTO balanceUpdateDTO = new UserBalanceUpdateDTO();
-                    balanceUpdateDTO.setDescription("Bought " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
-                    balanceUpdateDTO.setAmount(orderDTO.getPrice());
-                    balanceUpdateDTO.setAction(BalanceAction.DEBIT);
-                    balanceUpdateDTO.setType(UpdateType.AVAILABLE_BALANCE);
-                    balanceUpdateDTO.setUserId(orderDTO.getUserId());
-                    userAccountBalanceEventPublisher.publishEvent(balanceUpdateDTO);
-                }
+
+                portfolioProduct.setQuantity(portfolioProduct.getQuantity() - orderDTO.getQuantity());
+                portfolioProduct.setLockedQuantity(portfolioProduct.getLockedQuantity() + orderDTO.getQuantity());
+
+                portfolioProductRepository.save(portfolioProduct);
             }
+        case BUY -> {
+            double priceToUse = (orderDTO.getType() == OrderType.MARKET) 
+                    ? product.getAskPrice() 
+                    : orderDTO.getPrice();
+            
+            double totalCost = priceToUse * orderDTO.getQuantity();
+            
+            // 1. Decrease available balance
+            UserBalanceUpdateDTO decreaseAvailable = new UserBalanceUpdateDTO();
+            decreaseAvailable.setDescription("Locked funds for buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
+            decreaseAvailable.setAmount(totalCost);
+            decreaseAvailable.setAction(BalanceAction.DEBIT);
+            decreaseAvailable.setType(UpdateType.AVAILABLE_BALANCE);
+            decreaseAvailable.setUserId(orderDTO.getUserId());
+            userAccountBalanceEventPublisher.publishEvent(decreaseAvailable);
+            
+            // 2. Increase locked balance
+            UserBalanceUpdateDTO increaseLocked = new UserBalanceUpdateDTO();
+            increaseLocked.setDescription("Locked funds for buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
+            increaseLocked.setAmount(totalCost);
+            increaseLocked.setAction(BalanceAction.CREDIT);
+            increaseLocked.setType(UpdateType.LOCK_AMOUNT);
+            increaseLocked.setUserId(orderDTO.getUserId());
+            userAccountBalanceEventPublisher.publishEvent(increaseLocked);
+        }
+        }
+
+
+        if (orderDTO.getType() == OrderType.MARKET) {
+            order.setPrice(0.0); 
+        } else {
             order.setPrice(orderDTO.getPrice());
-            order.setQuantity(orderDTO.getQuantity());
-            order.setSide(orderDTO.getSide());
-            order.setType(orderDTO.getType());
-            order.setUserId(orderDTO.getUserId());
+        }
 
-            order.setPortfolio(portfolio);
-            order.setProduct(product);
-            order.setCreatedAt(LocalDateTime.now());
+        order.setQuantity(orderDTO.getQuantity());
+        order.setSide(orderDTO.getSide());
+        order.setType(orderDTO.getType());
+        order.setUserId(orderDTO.getUserId());
+        order.setPortfolio(portfolio);
+        order.setProduct(product);
+        order.setCreatedAt(LocalDateTime.now());
 
-            saveResult = orderRepository.save(order);
+        saveResult = orderRepository.save(order);
         }
 
         return saveResult;
@@ -201,10 +229,16 @@ public class OrderService {
     }
 
     private boolean balanceIsEnough(OrderDTO orderDTO) throws InsufficientBalanceException {
+
+        Product product = productRepository.findByTicker(orderDTO.getProduct())
+                .orElseThrow(() -> new NotFoundException(orderDTO.getProduct() + " does not exist"));
         String cachedAccount = (String)redisService.getItem(orderDTO.getUserId());
         AccountDTO accountDTO = new JsonBuilder().gson().fromJson(cachedAccount, AccountDTO.class);
         double balance= accountDTO.getAvailableBalance();
-        double orderValue = orderDTO.getQuantity() * orderDTO.getPrice();
+        double priceToUse = (orderDTO.getType() == OrderType.MARKET)
+                ? product.getAskPrice()
+                : orderDTO.getPrice();
+        double orderValue = orderDTO.getQuantity() * priceToUse;
 
         if (!(balance >= orderValue))
             throw new InsufficientBalanceException("Account balance is not enough to make this buy order");
@@ -212,22 +246,40 @@ public class OrderService {
         return true;
     }
 
-    private boolean priceIsValid(OrderDTO orderDTO) throws InvalidOrderException {
-        // todo: get product details from cache (focus is price)
-        Product product = productRepository.findByTicker(orderDTO.getProduct())
-                .orElseThrow(() -> new NotFoundException("Product does not exist"));
+private boolean priceIsValid(OrderDTO orderDTO) throws InvalidOrderException {
+    Product product = productRepository.findByTicker(orderDTO.getProduct())
+            .orElseThrow(() -> new NotFoundException("Product does not exist"));
 
-        double priceDiff=0;
-        switch (orderDTO.getSide()) {
-            case BUY -> priceDiff = Math.abs(orderDTO.getPrice() - product.getBidPrice());
-            case SELL -> priceDiff = Math.abs(orderDTO.getPrice() - product.getAskPrice());
+    double orderPrice = orderDTO.getPrice();
+    double lastTradedPrice = product.getLastTradedPrice();
+    double maxShiftPrice = product.getMaxShiftPrice();
+    
+    // Calculate allowed price range based on last traded price
+    double minAllowedPrice = lastTradedPrice - maxShiftPrice;
+    double maxAllowedPrice = lastTradedPrice + maxShiftPrice;
+    
+    // Validate based on order side
+    switch (orderDTO.getSide()) {
+        case BUY -> {
+            if (orderPrice < minAllowedPrice) {
+                throw new InvalidOrderException("Bid price is too low");
+            }
+            if (orderPrice > maxAllowedPrice) {
+                throw new InvalidOrderException("Bid price is too high");
+            }
         }
-
-        if (!(priceDiff <= product.getMaxShiftPrice()))
-            throw new InvalidOrderException("Price is too high");
-
-        return priceDiff <= product.getMaxShiftPrice();
+        case SELL -> {
+            if (orderPrice < minAllowedPrice) {
+                throw new InvalidOrderException("Ask price is too low");
+            }
+            if (orderPrice > maxAllowedPrice) {
+                throw new InvalidOrderException("Ask price is too high");
+            }
+        }
     }
+    
+    return true;
+}
 
     private boolean quantityIsValid(OrderDTO orderDTO) throws InvalidOrderException {
         // todo: get product details from cache (focus is quantity)
