@@ -10,10 +10,7 @@ import app.tradeflows.api.order_service.entities.Order;
 import app.tradeflows.api.order_service.entities.Portfolio;
 import app.tradeflows.api.order_service.entities.PortfolioProduct;
 import app.tradeflows.api.order_service.entities.Product;
-import app.tradeflows.api.order_service.enums.BalanceAction;
-import app.tradeflows.api.order_service.enums.OrderStatus;
-import app.tradeflows.api.order_service.enums.OrderType;
-import app.tradeflows.api.order_service.enums.UpdateType;
+import app.tradeflows.api.order_service.enums.*;
 import app.tradeflows.api.order_service.events.publishers.UserAccountBalanceEventPublisher;
 import app.tradeflows.api.order_service.exceptions.InsufficientBalanceException;
 import app.tradeflows.api.order_service.exceptions.InsufficientStocksException;
@@ -131,7 +128,7 @@ public class OrderService {
             
             // 1. Decrease available balance
             UserBalanceUpdateDTO decreaseAvailable = new UserBalanceUpdateDTO();
-            decreaseAvailable.setDescription("Locked funds for buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
+            decreaseAvailable.setDescription("Placed buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
             decreaseAvailable.setAmount(totalCost);
             decreaseAvailable.setAction(BalanceAction.DEBIT);
             decreaseAvailable.setType(UpdateType.AVAILABLE_BALANCE);
@@ -140,7 +137,7 @@ public class OrderService {
             
             // 2. Increase locked balance
             UserBalanceUpdateDTO increaseLocked = new UserBalanceUpdateDTO();
-            increaseLocked.setDescription("Locked funds for buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
+            increaseLocked.setDescription("Placed buy order: " + orderDTO.getQuantity() + " of " + orderDTO.getProduct());
             increaseLocked.setAmount(totalCost);
             increaseLocked.setAction(BalanceAction.CREDIT);
             increaseLocked.setType(UpdateType.LOCK_AMOUNT);
@@ -150,11 +147,15 @@ public class OrderService {
         }
 
 
-        if (orderDTO.getType() == OrderType.MARKET) {
-            order.setPrice(0.0); 
-        } else {
-            order.setPrice(orderDTO.getPrice());
-        }
+            if (orderDTO.getType() == OrderType.MARKET) {
+                // Market orders: use current market price
+                order.setPrice(orderDTO.getSide() == Side.BUY
+                        ? product.getAskPrice()  // Buy at ask
+                        : product.getBidPrice()); // Sell at bid
+            } else {
+                // Limit orders: use user's specified price
+                order.setPrice(orderDTO.getPrice());
+            }
 
         order.setQuantity(orderDTO.getQuantity());
         order.setSide(orderDTO.getSide());

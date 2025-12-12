@@ -57,7 +57,7 @@ public class SuccessfulOrderExecutionEventListener {
         Order order = optionalOrder.get();
         updateOrderStatus(order);
         createTrade(executedOrder, order);
-        sendUserBalanceUpdate(executedOrder, order);
+//        sendUserBalanceUpdate(executedOrder, order);
         publishAuditLog(executedOrder, order);
     }
 
