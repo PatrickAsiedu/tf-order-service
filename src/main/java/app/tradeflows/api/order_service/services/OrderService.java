@@ -232,8 +232,18 @@ public class OrderService {
 
         Product product = productRepository.findByTicker(orderDTO.getProduct())
                 .orElseThrow(() -> new NotFoundException(orderDTO.getProduct() + " does not exist"));
-        String cachedAccount = (String)redisService.getItem(orderDTO.getUserId());
-        AccountDTO accountDTO = new JsonBuilder().gson().fromJson(cachedAccount, AccountDTO.class);
+        Object cachedAccountObj = redisService.getItem(orderDTO.getUserId());
+        AccountDTO accountDTO;
+        // cached value might be stored as JSON string, a LinkedHashMap (from some serializers), or already an AccountDTO
+        if (cachedAccountObj instanceof String) {
+            accountDTO = new JsonBuilder().gson().fromJson((String) cachedAccountObj, AccountDTO.class);
+        } else if (cachedAccountObj instanceof AccountDTO) {
+            accountDTO = (AccountDTO) cachedAccountObj;
+        } else {
+            // Fallback: convert object to JSON string then parse
+            String json = new JsonBuilder().gson().toJson(cachedAccountObj);
+            accountDTO = new JsonBuilder().gson().fromJson(json, AccountDTO.class);
+        }
         double balance= accountDTO.getAvailableBalance();
         double priceToUse = (orderDTO.getType() == OrderType.MARKET)
                 ? product.getAskPrice()
