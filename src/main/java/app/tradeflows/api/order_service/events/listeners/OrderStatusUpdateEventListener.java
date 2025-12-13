@@ -61,7 +61,9 @@ public class OrderStatusUpdateEventListener {
                 logger.info("Trade not found for Reference{}", event.getExchangeOrderReference());
                 return;
             }
-            Trade trade = tradeOptional.get();;
+            Trade trade = tradeOptional.get();
+            // capture previously recorded settled units to compute delta and avoid duplicate processing
+            int priorSettledUnits = trade.getSettledUnit();
             exchangeServerClient.setServer(event.getExchangeServer());
             CheckStatusDTO statusDTO = exchangeServerClient.confirmOrderStatus(event.getExchangeOrderReference());
             Optional<Order> optionalOrder = orderRepository.findById(trade.getOrder().getId());
@@ -71,10 +73,14 @@ public class OrderStatusUpdateEventListener {
             }
 
             Order order = optionalOrder.get();
-            if (statusDTO.getTradeStatus() == TradeStatus.FILLED) {
-                trade.setDateFulfilled(LocalDateTime.now());
-                trade.setSettledUnit(statusDTO.getQuantity());
-                order.setStatus(hasAllRelatedTradeFilled(order, statusDTO));
+            if (statusDTO.getTradeStatus() == TradeStatus.FILLED || statusDTO.getTradeStatus() == TradeStatus.PARTIALLY_FILLED) {
+                // update settled units to what's reported by exchange
+                int newSettled = statusDTO.getQuantity();
+                trade.setSettledUnit(newSettled);
+                if (statusDTO.getTradeStatus() == TradeStatus.FILLED) {
+                    trade.setDateFulfilled(LocalDateTime.now());
+                    order.setStatus(hasAllRelatedTradeFilled(order, statusDTO));
+                }
             }
             trade.setTradeStatus(statusDTO.getTradeStatus());
             trade.setSettledPrice(statusDTO.getPrice());
@@ -82,11 +88,25 @@ public class OrderStatusUpdateEventListener {
             tradeRepository.save(trade);
 
 //            try {
-//                    if (order.getType() == OrderType.MARKET ) {
-//                        handleMarketOrdersBalanceUpdate(order,statusDTO);
-//                    } else {
-//                        handleLimitOrdersBalanceUpdate(order, statusDTO);
-//                    }
+//                int reported = statusDTO.getQuantity();
+//                int deltaQty = Math.max(0, reported - priorSettledUnits);
+//
+//                if (deltaQty <= 0) {
+//                    // nothing new to process
+//                    return;
+//                }
+//
+//                // create a lightweight copy of statusDTO values for delta processing
+//                CheckStatusDTO deltaStatus = new CheckStatusDTO();
+//                deltaStatus.setTradeStatus(statusDTO.getTradeStatus());
+//                deltaStatus.setPrice(statusDTO.getPrice());
+//                deltaStatus.setQuantity(deltaQty);
+//
+//                if (order.getType() == OrderType.MARKET ) {
+//                    handleMarketOrdersBalanceUpdate(order, deltaStatus);
+//                } else {
+//                    handleLimitOrdersBalanceUpdate(order, deltaStatus);
+//                }
 //
 //            } catch (Exception ex) {
 //                logger.error("Failed to publish balance update event: {}", ex.getMessage());
@@ -198,35 +218,27 @@ public void handleMarketOrdersBalanceUpdate(Order order, CheckStatusDTO statusDT
 }
 
 public void handleLimitOrdersBalanceUpdate(Order order, CheckStatusDTO statusDTO) {
+        logger.info("i run ,deduct balance");
           UserBalanceUpdateDTO updateDTO = new UserBalanceUpdateDTO();
             int executedQty = statusDTO.getQuantity();
-          
-                    double executedPrice = statusDTO.getPrice();
-
-
-              
-                    double amount = executedPrice * executedQty;
+            double executedPrice = statusDTO.getPrice();
+            double amount = executedPrice * executedQty;
 
         if (order.getSide() == Side.BUY) {
-              updateDTO.setAction(BalanceAction.DEBIT);
-                        updateDTO.setType(UpdateType.LOCK_AMOUNT);
-                        updateDTO.setAmount(amount);
-                        updateDTO.setDescription(statusDTO.getTradeStatus() == TradeStatus.FILLED ?
-                                "Filled sell order: " + executedQty + " of " + order.getProduct().getTicker() :
-                                "Partially filled sell order: " + executedQty + " of " + order.getProduct().getTicker());
-                        updateDTO.setUserId(order.getUserId());
-                        userAccountBalanceEventPublisher.publishEvent(updateDTO);
-
-
-        }
-        else{
+            updateDTO.setAction(BalanceAction.DEBIT);
+            updateDTO.setType(UpdateType.LOCK_AMOUNT);
+            updateDTO.setAmount(amount);
+            updateDTO.setDescription(
+                    "Filled sell order: " + executedQty + " of " + order.getProduct().getTicker());
+            updateDTO.setUserId(order.getUserId());
+            userAccountBalanceEventPublisher.publishEvent(updateDTO);
+        } else{
                 // SELL: credit available balance 
                         updateDTO.setAction(BalanceAction.CREDIT);
                         updateDTO.setType(UpdateType.AVAILABLE_BALANCE);
                         updateDTO.setAmount(amount);
-                        updateDTO.setDescription(statusDTO.getTradeStatus() == TradeStatus.FILLED ?
-                                "Filled sell order: " + executedQty + " of " + order.getProduct().getTicker() :
-                                "Partially filled sell order: " + executedQty + " of " + order.getProduct().getTicker());
+                        updateDTO.setDescription(
+                                "Filled sell order: " + executedQty + " of " + order.getProduct().getTicker());
                         updateDTO.setUserId(order.getUserId());
                         userAccountBalanceEventPublisher.publishEvent(updateDTO);
         }

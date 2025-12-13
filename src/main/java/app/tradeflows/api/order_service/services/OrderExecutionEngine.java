@@ -74,6 +74,7 @@ public class OrderExecutionEngine {
         orderDTO.setProduct(order.getProduct().getTicker());
         orderDTO.setQuantity(order.getQuantity());
         orderDTO.setSide(order.getSide());
+        orderDTO.setType(order.getType());
         orderDTO.setPrice(order.getPrice());
         return orderDTO;
     }

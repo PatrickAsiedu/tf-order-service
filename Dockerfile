@@ -13,7 +13,7 @@ COPY src ./src
 RUN mvn -Dmaven.repo.local=/app/.m3/repository package -DskipTests=true
 
 # Stage 2: Run with OpenJDK 17
-FROM openjdk:17-jdk-slim AS production-stage
+FROM eclipse-temurin:21-jre-jammy AS production-stage
 WORKDIR /app
 
 # Install additional packages if needed
