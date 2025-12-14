@@ -72,10 +72,7 @@ public class SuccessfulOrderExecutionEventListener {
         trade.setExchangeServerReference(executedOrder.getExchangeServerReference());
         trade.setExchangeServerId(executedOrder.getExchangeServer().getType());
         trade.setTradeStatus(TradeStatus.PENDING);
-        trade.setSettledUnit(executedOrder.getQuantity());
-        trade.setSettledPrice(executedOrder.getPrice());
         trade.setCreatedAt(LocalDateTime.now());
-        trade.setDateFulfilled(LocalDateTime.now());
         tradeRepository.save(trade);
     }
 

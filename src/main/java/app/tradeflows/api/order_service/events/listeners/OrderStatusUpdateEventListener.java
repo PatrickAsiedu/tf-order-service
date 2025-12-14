@@ -108,20 +108,20 @@ public class OrderStatusUpdateEventListener {
             // Optionally handle balance updates based on order type
             // Uncomment and adjust as needed for your balance logic
 
-//            try {
-//                CheckStatusDTO deltaStatus = new CheckStatusDTO();
-//                deltaStatus.setTradeStatus(statusDTO.getTradeStatus());
-//                deltaStatus.setPrice(statusDTO.getPrice());
-//                deltaStatus.setQuantity(newlySettledUnits);
-//
-//                if (order.getType() == OrderType.MARKET) {
-//                    handleMarketOrdersBalanceUpdate(order, deltaStatus);
-//                } else {
-//                    handleLimitOrdersBalanceUpdate(order, deltaStatus);
-//                }
-//            } catch (Exception ex) {
-//                logger.error("Failed to publish balance update event: {}", ex.getMessage(), ex);
-//            }
+            try {
+                CheckStatusDTO deltaStatus = new CheckStatusDTO();
+                deltaStatus.setTradeStatus(statusDTO.getTradeStatus());
+                deltaStatus.setPrice(statusDTO.getPrice());
+                deltaStatus.setQuantity(newlySettledUnits);
+
+                if (order.getType() == OrderType.MARKET) {
+                    handleMarketOrdersBalanceUpdate(order, deltaStatus);
+                } else {
+                    handleLimitOrdersBalanceUpdate(order, deltaStatus);
+                }
+            } catch (Exception ex) {
+                logger.error("Failed to publish balance update event: {}", ex.getMessage(), ex);
+            }
 
 
         } catch (Exception ex) {
@@ -193,19 +193,20 @@ public class OrderStatusUpdateEventListener {
                 double oldValue = portfolioProduct.getValue();
 
                 portfolioProduct.setLockedQuantity(oldLockedQuantity - newlySettledUnits);
-                portfolioProduct.setValue(oldValue - executionValue);
+                // Remove proportional value based on average cost
+                double avgCost = oldValue / (oldQuantity + oldLockedQuantity);
+                portfolioProduct.setValue(oldValue - (avgCost * newlySettledUnits));
 
-                // Update price only if quantity remains (avoid division by zero)
-                if (portfolioProduct.getQuantity() > 0) {
-                    portfolioProduct.setPrice(portfolioProduct.getValue() / portfolioProduct.getQuantity());
-                } else {
+                // Price (average cost) stays the same unless all shares are gone
+                if ((oldQuantity + portfolioProduct.getLockedQuantity()) <= 0) {
                     portfolioProduct.setPrice(0.0);
                 }
+                // Otherwise price remains unchanged (same avg cost basis)
 
-                logger.info("Updated SELL: removed {} units at {} (old: {} @ {}, new: {} @ {})",
+                logger.info("Updated SELL: unlocked {} units at {} (available: {}, locked: {} -> {}, value: {} -> {})",
                         newlySettledUnits, executionPrice, oldQuantity,
-                        oldValue / oldQuantity, portfolioProduct.getQuantity(),
-                        portfolioProduct.getQuantity() > 0 ? portfolioProduct.getValue() / portfolioProduct.getQuantity() : 0);
+                        oldLockedQuantity, portfolioProduct.getLockedQuantity(),
+                        oldValue, portfolioProduct.getValue());
             }
         }
 
