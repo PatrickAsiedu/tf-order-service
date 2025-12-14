@@ -22,7 +22,7 @@ public class OrderProcessorJob {
 
     @Scheduled(cron = "*/10 * * * * ?")
     public void run(){
-        List<Order> orders = orderRepository.findDistinctByStatusOrStatusOrderByCreatedAtAsc(OrderStatus.PENDING, OrderStatus.PARTIALLY_FILLED);
+        List<Order> orders = orderRepository.findOrdersByStatus(OrderStatus.PENDING);
         orders.forEach(executionEngine::process);
     }
 }

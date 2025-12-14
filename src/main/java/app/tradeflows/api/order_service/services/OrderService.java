@@ -212,9 +212,7 @@ public class OrderService {
 
 
     // helpers
-    public boolean clientHasEnoughStock(OrderDTO orderDTO) throws InvalidOrderException {
-        //todo: check if user has that specific stock (from the cache)
-
+    public boolean clientHasEnoughStock(OrderDTO orderDTO) throws InvalidOrderException, InsufficientStocksException {
         Optional<PortfolioProduct> portfolioProduct = Optional.ofNullable(portfolioProductRepository
                 .findByPortfolioIdAndProductId(
                         orderDTO.getPortfolioId(),
@@ -223,10 +221,14 @@ public class OrderService {
                 ));
 
         if (portfolioProduct.isPresent()) {
-            return ( orderDTO.getQuantity() <= portfolioProduct.get().getQuantity() );
-        }
-        else
+            if (orderDTO.getQuantity() > portfolioProduct.get().getQuantity()) {
+                throw new InsufficientStocksException("Insufficient stock. Available: "
+                        + portfolioProduct.get().getQuantity() + ", Required: " + orderDTO.getQuantity());
+            }
+            return true;
+        } else {
             throw new InvalidOrderException("The selected product does not exist in the user's portfolio");
+        }
     }
 
     private boolean balanceIsEnough(OrderDTO orderDTO) throws InsufficientBalanceException {
